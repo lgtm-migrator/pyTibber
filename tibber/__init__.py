@@ -90,44 +90,34 @@ class Tibber:
         await self.sub_manager.stop()
 
     async def execute(
-        self, document: str, variable_values: dict | None = None
-    ) -> dict | None:
-        """Execute a GraphQL query and return the data.
-
-        :param document: The GraphQL query to request.
-        :param variable_values: The GraphQL variables to parse with the request.
-        """
-        if (res := await self._execute(document, variable_values)) is None:
-            return None
-        return res.get("data")
-
-    async def _execute(
-        self, document: str, variable_values: dict | None = None, retry: int = 2
-    ) -> dict | None:
+        self,
+        document: str,
+        variable_values: dict | None = None,
+        retry: int = 3,
+    ) -> dict:
         """Execute a GraphQL query and return the result as a dict loaded from the json response.
 
         :param document: The GraphQL query to request.
         :param variable_values: The GraphQL variables to parse with the request.
+        :param retry: Number of retries.
         """
-        payload = {"query": document, "variables": variable_values or {}}
-
-        post_args = {
-            "headers": {
-                "Authorization": "Bearer " + self._access_token,
-                aiohttp.hdrs.USER_AGENT: self.user_agent,
-            },
-            "data": payload,
+        data = {"query": document, "variables": variable_values or {}}
+        headers = {
+            "Authorization": "Bearer " + self._access_token,
+            aiohttp.hdrs.USER_AGENT: self.user_agent,
         }
         try:
             async with async_timeout.timeout(self._timeout):
-                resp = await self.websession.post(API_ENDPOINT, **post_args)
-            if resp.status != 200:
-                _LOGGER.error("Error connecting to Tibber, resp code: %s", resp.status)
-                return None
+                resp = await self.websession.post(
+                    API_ENDPOINT,
+                    headers=headers,
+                    data=data,
+                )
+            resp.raise_for_status()
             result = await resp.json()
-        except aiohttp.ClientError as err:
+        except (aiohttp.ClientError, aiohttp.ClientResponseError) as err:
             if retry > 0:
-                return await self._execute(document, variable_values, retry - 1)
+                return await self.execute(document, variable_values, retry - 1)
             _LOGGER.error("Error connecting to Tibber: %s ", err, exc_info=True)
             raise
         except asyncio.TimeoutError:
@@ -135,11 +125,11 @@ class Tibber:
             raise
         if errors := result.get("errors"):
             _LOGGER.error("Received non-compatible response %s", errors)
-        return result
+        return result.get("data")
 
     async def update_info(self) -> None:
         """Updates home info asynchronously."""
-        if (res := await self._execute(INFO)) is None:
+        if (res := await self.execute(INFO)) is None:
             return
         if errors := res.get("errors", []):
             msg = errors[0].get("message", "failed to login")
@@ -179,11 +169,10 @@ class Tibber:
             if (home := self.get_home(home_id))
         ]
 
-    def get_home(self, home_id: str) -> TibberHome | None:
+    def get_home(self, home_id: str) -> TibberHome:
         """Return an instance of TibberHome for given home id."""
         if home_id not in self._all_home_ids:
-            _LOGGER.error("Could not find any Tibber home with id: %s", home_id)
-            return None
+            raise Exception("Could not find any Tibber home with id: %s", home_id)
         if home_id not in self._homes:
             self._homes[home_id] = TibberHome(home_id, self)
         return self._homes[home_id]
